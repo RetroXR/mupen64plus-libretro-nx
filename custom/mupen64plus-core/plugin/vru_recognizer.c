@@ -199,8 +199,10 @@ static void vru_dlclose(void* lib)
 
 static const char* vru_library_name(void)
 {
-#ifdef _WIN32
+#if defined(_WIN32)
     return "libvosk.dll";
+#elif defined(__APPLE__)
+    return "libvosk.dylib";
 #else
     return "libvosk.so";
 #endif
