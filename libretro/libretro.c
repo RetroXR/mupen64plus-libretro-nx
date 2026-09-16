@@ -210,6 +210,8 @@ char* retro_transferpak_ram_path = NULL;
  * independent paks whose cartridges can be changed while the game runs. */
 static struct retro_transfer_pak_interface transferpak_iface;
 static bool transferpak_iface_ok = false;
+static struct retro_transfer_pak_clock_interface transferpak_clock_iface;
+static bool transferpak_clock_iface_ok = false;
 static unsigned transferpak_generation[RETRO_TRANSFER_PAK_PORTS] = {0};
 
 uint32_t CoreOptionCategoriesSupported = 0;
@@ -548,6 +550,18 @@ static char* media_loader_get_gb_cart_ram(void* cb_data, int controller_num)
     if (controller_num < 0 || controller_num >= RETRO_TRANSFER_PAK_PORTS)
         return NULL;
     path = transferpak_iface.get_ram(transferpak_iface.frontend_data, (unsigned)controller_num);
+    return (path && *path) ? strdup(path) : NULL;
+}
+
+static char* media_loader_get_gb_cart_rtc(void* cb_data, int controller_num)
+{
+    const char* path;
+    (void)cb_data;
+    if (!transferpak_clock_iface_ok || !transferpak_clock_iface.get_rtc)
+        return NULL;
+    if (controller_num < 0 || controller_num >= RETRO_TRANSFER_PAK_PORTS)
+        return NULL;
+    path = transferpak_clock_iface.get_rtc(transferpak_clock_iface.frontend_data, (unsigned)controller_num);
     return (path && *path) ? strdup(path) : NULL;
 }
 
@@ -993,6 +1007,13 @@ void retro_init(void)
         g_media_loader.get_gb_cart_ram = media_loader_get_gb_cart_ram;
         if (log_cb)
             log_cb(RETRO_LOG_INFO, CORE_NAME ": frontend serves Transfer Pak media per port\n");
+
+        memset(&transferpak_clock_iface, 0, sizeof(transferpak_clock_iface));
+        transferpak_clock_iface_ok =
+            environ_cb(RETRO_ENVIRONMENT_GET_TRANSFER_PAK_CLOCK_INTERFACE, &transferpak_clock_iface)
+            || environ_cb(RETRO_ENVIRONMENT_GET_TRANSFER_PAK_CLOCK_INTERFACE_FINAL, &transferpak_clock_iface);
+        if (transferpak_clock_iface_ok)
+            g_media_loader.get_gb_cart_rtc = media_loader_get_gb_cart_rtc;
     }
 
     m64p_error ret = CoreStartup(FRONTEND_API_VERSION, ".", ".", NULL, n64DebugCallback, 0, n64StateCallback);

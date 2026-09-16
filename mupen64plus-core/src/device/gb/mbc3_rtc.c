@@ -21,9 +21,10 @@
 
 #include "mbc3_rtc.h"
 #include "backends/api/clock_backend.h"
+#include "backends/api/storage_backend.h"
 #include <string.h>
 
-/* TODO: halt bit is not implemented */
+#define MBC3_RTC_HALT 0x40
 
 static void update_rtc_regs(struct mbc3_rtc* rtc)
 {
@@ -32,8 +33,15 @@ static void update_rtc_regs(struct mbc3_rtc* rtc)
     time_t diff = now - rtc->last_time;
     rtc->last_time = now;
 
+    /* a halted clock does not count */
+    if (rtc->regs[MBC3_RTC_DAYS_H] & MBC3_RTC_HALT) {
+        return;
+    }
+
     /* increment regs */
     if (diff > 0) {
+        unsigned int day_carry = 0;
+
         rtc->regs[MBC3_RTC_SECONDS] += (int)(diff % 60);
         if (rtc->regs[MBC3_RTC_SECONDS] >= 60) {
             rtc->regs[MBC3_RTC_SECONDS] -= 60;
@@ -51,20 +59,69 @@ static void update_rtc_regs(struct mbc3_rtc* rtc)
         rtc->regs[MBC3_RTC_HOURS] += (int)(diff % 24);
         if (rtc->regs[MBC3_RTC_HOURS] >= 24) {
             rtc->regs[MBC3_RTC_HOURS] -= 24;
-            ++rtc->regs[MBC3_RTC_DAYS_L];
+            day_carry = 1;
         }
         diff /= 24;
 
-        /* update days counter */
+        /* update days counter, 9 bits across DAYS_L and bit 0 of DAYS_H */
         unsigned int days = (((rtc->regs[MBC3_RTC_DAYS_H] & 0x01) << 8) | rtc->regs[MBC3_RTC_DAYS_L])
-            + (int)diff;
+            + (int)diff + day_carry;
 
         rtc->regs[MBC3_RTC_DAYS_L] = days & 0xff;
-        rtc->regs[MBC3_RTC_DAYS_H] = (rtc->regs[MBC3_RTC_DAYS_H] & ~0x01) | (days & 0x100);
+        rtc->regs[MBC3_RTC_DAYS_H] = (rtc->regs[MBC3_RTC_DAYS_H] & ~0x01) | ((days >> 8) & 0x01);
 
         /* set carry bit if days overflow */
         if (days > 511) { rtc->regs[MBC3_RTC_DAYS_H] |= 0x80; }
     }
+}
+
+static void save_mbc3_rtc(struct mbc3_rtc* rtc)
+{
+    uint8_t* data;
+    uint64_t t = (uint64_t)(int64_t)rtc->last_time;
+    unsigned int i, k;
+
+    if (rtc->storage == NULL) {
+        return;
+    }
+
+    data = rtc->istorage->data(rtc->storage);
+    for (i = 0; i < MBC3_RTC_REGS_COUNT; ++i) {
+        for (k = 0; k < 4; ++k) {
+            data[4 * i + k] = (k == 0) ? rtc->regs[i] : 0;
+            data[20 + 4 * i + k] = (k == 0) ? rtc->latched_regs[i] : 0;
+        }
+    }
+    for (k = 0; k < 8; ++k) {
+        data[40 + k] = (uint8_t)(t >> (8 * k));
+    }
+    rtc->istorage->save(rtc->storage, 0, MBC3_RTC_SAVE_SIZE);
+}
+
+static int load_mbc3_rtc(struct mbc3_rtc* rtc)
+{
+    const uint8_t* data;
+    uint64_t t = 0;
+    unsigned int i, k;
+
+    if (rtc->storage == NULL || rtc->istorage->size(rtc->storage) < MBC3_RTC_SAVE_SIZE) {
+        return 0;
+    }
+
+    data = rtc->istorage->data(rtc->storage);
+    for (k = 0; k < 8; ++k) {
+        t |= (uint64_t)data[40 + k] << (8 * k);
+    }
+    if (t == UINT64_MAX) {
+        return 0;
+    }
+
+    for (i = 0; i < MBC3_RTC_REGS_COUNT; ++i) {
+        rtc->regs[i] = data[4 * i];
+        rtc->latched_regs[i] = data[20 + 4 * i];
+    }
+    rtc->last_time = (time_t)(int64_t)t;
+    return 1;
 }
 
 void init_mbc3_rtc(struct mbc3_rtc* rtc,
@@ -75,12 +132,20 @@ void init_mbc3_rtc(struct mbc3_rtc* rtc,
     rtc->iclock = iclock;
 }
 
+/* The cartridge's battery keeps its clock through a power cycle, so power-on
+ * restores a kept clock rather than clearing it. A clock with nothing kept starts
+ * at zero NOW, and is written at once so it goes on counting from here. */
 void poweron_mbc3_rtc(struct mbc3_rtc* rtc)
 {
+    rtc->latch = 0;
+    if (load_mbc3_rtc(rtc)) {
+        return;
+    }
+
     memset(rtc->regs, 0, MBC3_RTC_REGS_COUNT);
     memset(rtc->latched_regs, 0, MBC3_RTC_REGS_COUNT);
-    rtc->latch = 0;
-    rtc->last_time = 0;
+    rtc->last_time = rtc->iclock->get_time(rtc->clock);
+    save_mbc3_rtc(rtc);
 }
 
 uint8_t read_mbc3_rtc_regs(struct mbc3_rtc* rtc, unsigned int reg)
@@ -95,7 +160,10 @@ uint8_t read_mbc3_rtc_regs(struct mbc3_rtc* rtc, unsigned int reg)
 
 void write_mbc3_rtc_regs(struct mbc3_rtc* rtc, unsigned int reg, uint8_t value)
 {
+    /* the time since the last update belongs to the old value */
+    update_rtc_regs(rtc);
     rtc->regs[reg] = value;
+    save_mbc3_rtc(rtc);
 }
 
 void latch_mbc3_rtc_regs(struct mbc3_rtc* rtc, uint8_t data)

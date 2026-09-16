@@ -218,6 +218,14 @@ typedef struct {
    * Empty or NULL string results in no DD disk being loaded (eg. empty disk drive).
    */
   char* (*get_dd_disk)(void* cb_data);
+
+  /* Allow the frontend to specify where the real-time clock of the GB cart is kept
+   * cb_data: points to frontend-defined callback data.
+   * controller_num: (0-3) tell the frontend which controller is about to load a GB cart
+   * Returns a NULL-terminated string owned by the core specifying the clock filename
+   * Empty or NULL string results in a clock that is not kept across power cycles.
+   */
+  char* (*get_gb_cart_rtc)(void* cb_data, int controller_num);
 } m64p_media_loader;
 
 /* ----------------------------------------- */

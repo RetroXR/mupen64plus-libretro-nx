@@ -26,6 +26,13 @@
 #include <time.h>
 
 struct clock_backend_interface;
+struct storage_backend_interface;
+
+/* The clock as its battery keeps it: little-endian uint32 seconds, minutes, hours,
+ * days low and days high, the same five latched, then the uint64 host time the
+ * counters were last brought up to date at. The layout mGBA, VBA-M and BGB use. A
+ * time of all ones means no clock has been kept yet. */
+#define MBC3_RTC_SAVE_SIZE 48
 
 enum mbc3_rtc_registers
 {
@@ -51,6 +58,11 @@ struct mbc3_rtc
 
     void* clock;
     const struct clock_backend_interface* iclock;
+
+    /* MBC3_RTC_SAVE_SIZE bytes the clock is kept in across power cycles, or NULL
+     * for a clock that is not kept. */
+    void* storage;
+    const struct storage_backend_interface* istorage;
 };
 
 void init_mbc3_rtc(struct mbc3_rtc* rtc,

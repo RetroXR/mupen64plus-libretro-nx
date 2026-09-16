@@ -1245,6 +1245,7 @@ struct gb_cart_data
     int control_id;
     struct file_storage rom_fstorage;
     struct file_storage ram_fstorage;
+    struct file_storage rtc_fstorage;
     void* gbcam_backend;
     const struct video_capture_backend_interface* igbcam_backend;
 };
@@ -1332,6 +1333,45 @@ static void init_gb_ram(void* opaque, size_t ram_size, void** storage, const str
     *istorage = &g_ifile_storage;
 }
 
+/* Keep the cartridge's clock in the file the frontend names, when it names one.
+ * After init_gb_cart and before the cartridge powers on, which is when a kept
+ * clock is read back. A cartridge without a clock has no iclock. */
+static void attach_gb_rtc(struct gb_cart_data* data, struct gb_cart* gb_cart)
+{
+    char* rtc_filename;
+    int err;
+
+    close_file_storage(&data->rtc_fstorage);
+    memset(&data->rtc_fstorage, 0, sizeof(data->rtc_fstorage));
+
+    if (gb_cart->read_gb_cart == NULL || gb_cart->rtc.iclock == NULL
+            || g_media_loader.get_gb_cart_rtc == NULL) {
+        return;
+    }
+
+    rtc_filename = g_media_loader.get_gb_cart_rtc(g_media_loader.cb_data, data->control_id);
+    if (rtc_filename == NULL || strlen(rtc_filename) == 0) {
+        free(rtc_filename);
+        return;
+    }
+
+    err = open_file_storage(&data->rtc_fstorage, MBC3_RTC_SAVE_SIZE, rtc_filename);
+    if (data->rtc_fstorage.data == NULL) {
+        close_file_storage(&data->rtc_fstorage);
+        memset(&data->rtc_fstorage, 0, sizeof(data->rtc_fstorage));
+        return;
+    }
+    if (err != file_ok) {
+        memset(data->rtc_fstorage.data, 0xff, MBC3_RTC_SAVE_SIZE);
+    }
+
+    log_cb(RETRO_LOG_INFO, "GB Loader clock: %s (%s)\n",
+            data->rtc_fstorage.filename, (err == file_ok) ? "kept" : "new");
+
+    gb_cart->rtc.storage = &data->rtc_fstorage;
+    gb_cart->rtc.istorage = &g_ifile_storage;
+}
+
 static void release_gb_ram(void* opaque)
 {
     struct gb_cart_data* data = (struct gb_cart_data*)opaque;
@@ -1363,6 +1403,7 @@ void main_change_gb_cart(int control_id)
     struct gb_cart_data* data = &l_gb_carts_data[control_id];
 
     /* reset gb_cart_data */
+    close_file_storage(&data->rtc_fstorage);
     memset(data, 0, sizeof(*data));
     data->control_id = control_id;
 
@@ -1372,6 +1413,7 @@ void main_change_gb_cart(int control_id)
             NULL, &g_iclock_ctime_plus_delta,
             &data->control_id, &g_irumble_backend_plugin_compat,
             data->gbcam_backend, data->igbcam_backend);
+    attach_gb_rtc(data, gb_cart);
 
     if (gb_cart->read_gb_cart == NULL) {
         gb_cart = NULL;
@@ -1675,6 +1717,7 @@ m64p_error main_run(void)
                             NULL, &g_iclock_ctime_plus_delta,
                             &l_gb_carts_data[i].control_id, &g_irumble_backend_plugin_compat,
                             l_gb_carts_data[i].gbcam_backend, l_gb_carts_data[i].igbcam_backend);
+                    attach_gb_rtc(&l_gb_carts_data[i], &g_dev.gb_carts[i]);
 
                     init_transferpak(&g_dev.transferpaks[i], (g_dev.gb_carts[i].read_gb_cart == NULL) ? NULL : &g_dev.gb_carts[i]);
                     l_paks[i][k] = &g_dev.transferpaks[i];
