@@ -27,7 +27,7 @@ INCFLAGS += \
 	-I$(AUDIO_LIBRETRO_DIR) \
 	-I$(LIBRETRO_COMM_DIR)/include \
 	-I$(LIBRETRO_DIR) \
-	-I$(ROOT_DIR)/external/vosk-api/src \
+	-I$(ROOT_DIR)/custom/dependencies/vosk \
 	-I$(VIDEODIR_GLIDEN64)/src/inc
 
 MINIZIP_INCFLAGS = -I$(MINIZIP_DIR)
