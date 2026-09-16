@@ -19,6 +19,7 @@
 #ifndef M64P_PLUGIN_VRU_RECOGNIZER_H
 #define M64P_PLUGIN_VRU_RECOGNIZER_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Everything here is called on the thread that calls retro_run, except
@@ -57,5 +58,24 @@ void vru_recognizer_note_attached(int port, int is_vru);
 int  vru_recognizer_start_offline(const char* system_dir);
 void vru_recognizer_push_pcm(const int16_t* samples, unsigned count);
 int  vru_recognizer_is_available(void);
+
+/* True once the worker has built a recognizer for the last complete list. A
+ * game sends its list long before anyone speaks; a test that speaks at once
+ * would be timing the model load (seconds for model-ja) instead. */
+int  vru_recognizer_grammar_ready(void);
+
+/* The three steps between a Japanese title's word and what Vosk is given,
+ * callable one at a time so the selftest can check each without a model.
+ *
+ * decode_word turns the uint16s a game sends into UTF-8 and returns 1 only for
+ * a word holding kana; a Shift-JIS character it cannot read comes back in
+ * *refused. fold_kana writes hiragana as katakana. segment splits a word into
+ * the fewest words of a words.txt, returning 1 when it could, 0 when it could
+ * not, and -1 when the file cannot be read. */
+int vru_recognizer_decode_word(const uint16_t* word, uint16_t length,
+                               char* out, size_t size, unsigned* refused);
+int vru_recognizer_fold_kana(const char* text, char* out, size_t size, int keep_spaces);
+int vru_recognizer_segment(const char* words_path, const char* text,
+                           char* phrase, size_t size);
 
 #endif /* M64P_PLUGIN_VRU_RECOGNIZER_H */

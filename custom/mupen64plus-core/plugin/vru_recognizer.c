@@ -61,8 +61,13 @@
 #define VRU_ERROR_NO_MATCH  0x4000
 #define VRU_MAX_MATCHES     5
 
-#define VRU_MAX_WORDS       64
-#define VRU_WORD_CHARS      96
+/* ClearVRUWords takes a uint8 count, and a word is at most 40 uint16s of
+ * joybus buffer: three UTF-8 bytes to a kana is 120. */
+#define VRU_MAX_WORDS       256
+#define VRU_WORD_CHARS      128
+/* A word split into lexicon words, one space between each, with a space
+ * either side to match on. */
+#define VRU_PHRASE_CHARS    (VRU_WORD_CHARS * 2 + 3)
 #define VRU_CAPTURE_RATE    48000
 #define VRU_RING_SECONDS    8
 #define VRU_RESULT_WAIT_MS  250
@@ -101,6 +106,16 @@ struct vru_word
     int  slot;
 };
 
+/* A word as the recognizer was built to hear it. */
+struct vru_grammar_word
+{
+    char text[VRU_WORD_CHARS];
+    /* Japanese only: the lexicon words it was given to Vosk as, folded to
+     * katakana with a space either side, or empty when it could not be. */
+    char key[VRU_PHRASE_CHARS];
+    int  slot;
+};
+
 /* The core options, kept apart from the rest: they arrive whenever the player
  * changes one, which can be before content is loaded, and loading content
  * resets everything else. */
@@ -126,6 +141,12 @@ static struct
     char            model_loaded[16];
     int             available;
     int             load_failed;
+
+    /* The worker's own copy of the list: the game may start sending the next
+     * one while this recognizer is still answering for the last. */
+    struct vru_grammar_word grammar[VRU_MAX_WORDS];
+    int                     grammar_count;
+    int                     grammar_japanese;
 
     /* the microphone, touched only by the frontend thread */
     struct retro_microphone_interface mic_iface;
@@ -349,65 +370,446 @@ static const char* vru_lookup(const uint16_t* word, uint16_t length)
     return (found != NULL) ? found->text : NULL;
 }
 
-/* A word the table does not carry may still be readable: the Japanese titles
- * send text rather than phoneme codes. Accept it when it decodes, so the
- * grammar can carry it and the model can be picked from it. */
-static int vru_decode_text(const uint16_t* word, uint16_t length, char* out, size_t size)
+/* ------------------------------------------------------------------ */
+/* Japanese                                                           */
+/* ------------------------------------------------------------------ */
+
+/* The kana of Shift-JIS, which is all a word list is spelled in. The katakana
+ * row steps over 0x837F because a trail byte is never 0x7F. */
+static unsigned vru_sjis_to_unicode(unsigned code)
+{
+    if (code >= 0x829F && code <= 0x82F1)
+        return 0x3041 + (code - 0x829F);
+    if (code >= 0x8340 && code <= 0x837E)
+        return 0x30A1 + (code - 0x8340);
+    if (code >= 0x8380 && code <= 0x8396)
+        return 0x30E0 + (code - 0x8380);
+    if (code == 0x815B)
+        return 0x30FC;
+    if (code == 0x8140)
+        return 0x3000;
+    return 0;
+}
+
+static int vru_sjis_lead(unsigned byte)
+{
+    return (byte >= 0x81 && byte <= 0x9F) || (byte >= 0xE0 && byte <= 0xEF);
+}
+
+/* Only three-byte sequences are decoded, since every kana is one; anything
+ * else comes back a byte at a time, to be copied through as it is. */
+static unsigned vru_utf8_next(const char* text, size_t* length)
+{
+    const unsigned char* u = (const unsigned char*)text;
+
+    if ((u[0] & 0xF0) == 0xE0 && (u[1] & 0xC0) == 0x80 && (u[2] & 0xC0) == 0x80)
+    {
+        *length = 3;
+        return ((unsigned)(u[0] & 0x0F) << 12) | ((unsigned)(u[1] & 0x3F) << 6)
+             | (unsigned)(u[2] & 0x3F);
+    }
+    *length = 1;
+    return u[0];
+}
+
+/* ASCII or a three-byte character; returns 0 when it and a terminator do not
+ * both fit. */
+static size_t vru_utf8_put(char* out, size_t at, size_t size, unsigned cp)
+{
+    if (cp < 0x80)
+    {
+        if (at + 1 >= size)
+            return 0;
+        out[at] = (char)cp;
+        return 1;
+    }
+    if (at + 3 >= size)
+        return 0;
+    out[at]     = (char)(0xE0 | (cp >> 12));
+    out[at + 1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[at + 2] = (char)(0x80 | (cp & 0x3F));
+    return 3;
+}
+
+/* The Japanese titles send a word as Shift-JIS, one character to each uint16,
+ * where the English one sends phoneme codes. It is converted to UTF-8 here,
+ * because that is what Vosk reads and answers in: copied byte for byte, the
+ * grammar was in one encoding and the answers in another, and no Japanese word
+ * could ever match. */
+int vru_recognizer_decode_word(const uint16_t* word, uint16_t length,
+                               char* out, size_t size, unsigned* refused)
 {
     size_t at = 0;
     unsigned i;
-    int nonascii = 0;
+    int japanese = 0;
 
-    for (i = 0; i < length && at + 2 < size; i++)
+    *refused = 0;
+    for (i = 0; i < length; i++)
     {
         const uint8_t* bytes = (const uint8_t*)&word[i];
-        int b;
-        for (b = 1; b >= 0; b--)
+        unsigned cp;
+        size_t put;
+
+        if (bytes[0] == 0 || bytes[1] == 0)
         {
-            uint8_t c = bytes[b];
-            if (c == 0)
+            cp = (unsigned)(bytes[0] | bytes[1]);
+            if (cp == 0)
                 continue;
-            if (c < 0x20)
+            if (cp < 0x20 || cp >= 0x80)
                 return 0;
-            if (c >= 0x80)
-                nonascii = 1;
-            out[at++] = (char)c;
         }
+        else
+        {
+            unsigned code = ((unsigned)bytes[1] << 8) | bytes[0];
+            cp = vru_sjis_to_unicode(code);
+            if (cp == 0)
+            {
+                /* Not kana. Only worth naming when it was Shift-JIS at all:
+                 * a phoneme code the table lacks lands here too. */
+                if (vru_sjis_lead(bytes[1]))
+                    *refused = code;
+                return 0;
+            }
+            japanese = 1;
+        }
+
+        put = vru_utf8_put(out, at, size, cp);
+        if (put == 0)
+            return 0;
+        at += put;
     }
     out[at] = '\0';
-    return (at > 0 && nonascii) ? 1 : 0;
+    return japanese;
+}
+
+/* Hiragana and katakana are one syllabary written twice. A game spells its
+ * words in hiragana; the model's lexicon spells a word in whichever one it was
+ * collected in, ピカチュウ only in katakana and こんにちわ in both. So words are
+ * compared in katakana. Spaces separate the lexicon's words and mean nothing to
+ * the game: they are dropped, or with keep_spaces written as one ASCII space. */
+int vru_recognizer_fold_kana(const char* text, char* out, size_t size, int keep_spaces)
+{
+    size_t at = 0;
+
+    while (*text != '\0')
+    {
+        size_t length;
+        unsigned cp = vru_utf8_next(text, &length);
+        size_t put;
+
+        if (cp == ' ' || cp == 0x3000)
+        {
+            text += length;
+            if (!keep_spaces)
+                continue;
+            cp = ' ';
+        }
+        else if ((cp >= 0x3041 && cp <= 0x3096) || cp == 0x309D || cp == 0x309E)
+        {
+            text += length;
+            cp += 0x60;
+        }
+        else
+        {
+            if (at + length >= size)
+                return 0;
+            memcpy(out + at, text, length);
+            at += length;
+            text += length;
+            continue;
+        }
+
+        put = vru_utf8_put(out, at, size, cp);
+        if (put == 0)
+            return 0;
+        at += put;
+    }
+    out[at] = '\0';
+    return 1;
+}
+
+/* A stretch of a game's folded word, and how the lexicon spells it if the
+ * lexicon has it. */
+struct vru_piece
+{
+    char* text;
+    char* spelling;
+    int   katakana;
+};
+
+static int vru_piece_order(const void* a, const void* b)
+{
+    return strcmp(((const struct vru_piece*)a)->text, ((const struct vru_piece*)b)->text);
+}
+
+static int vru_piece_compare(const void* key, const void* row)
+{
+    return strcmp((const char*)key, ((const struct vru_piece*)row)->text);
+}
+
+/* Where each character of a word starts, and where the last one ends. */
+static int vru_char_offsets(const char* text, size_t* offsets)
+{
+    int count = 0;
+    size_t at = 0;
+
+    while (text[at] != '\0' && count < VRU_WORD_CHARS)
+    {
+        size_t length;
+        offsets[count++] = at;
+        vru_utf8_next(text + at, &length);
+        at += length;
+    }
+    offsets[count] = at;
+    return count;
+}
+
+/* A grammar is built out of the words in the model's lexicon, and a word the
+ * lexicon lacks is left out of it. Most of what a Japanese title sends is not
+ * one of those words -- the Pikachu game sends ぴかっちゅう and ぴかてう beside
+ * ぴかちゅう, the ways a child might say it -- but nearly every one is a run of
+ * several: ピカ ッチュウ. So each word goes to Vosk as the fewest lexicon words
+ * that spell it. When the lexicon has both spellings of a stretch, the
+ * katakana one is given: a hiragana entry can be a particle, and は read as a
+ * particle is "wa".
+ *
+ * The lexicon is 200,000 lines and is not kept. The stretches of the game's
+ * words are gathered first, and each line is only looked up among them.
+ *
+ * Returns how many words were spelled, or -1 when words.txt cannot be read.
+ * A word that cannot be spelled gets an empty phrase. */
+static int vru_segment_words(const char* words_path, const char* const* texts, int count,
+                             char phrases[][VRU_PHRASE_CHARS])
+{
+    char* folded;
+    struct vru_piece* pieces = NULL;
+    char* blob = NULL;
+    size_t piece_count = 0, bytes = 0, at = 0, kept, p;
+    char line[512];
+    FILE* file;
+    int spelled = 0;
+    int w;
+
+    for (w = 0; w < count; w++)
+        phrases[w][0] = '\0';
+
+    file = fopen(words_path, "rb");
+    if (file == NULL)
+        return -1;
+
+    folded = (char*)calloc((size_t)(count > 0 ? count : 1), VRU_WORD_CHARS);
+    if (folded == NULL)
+    {
+        fclose(file);
+        return 0;
+    }
+
+    for (w = 0; w < count; w++)
+    {
+        size_t offsets[VRU_WORD_CHARS + 1];
+        int n, i, j;
+
+        if (!vru_recognizer_fold_kana(texts[w], folded + w * VRU_WORD_CHARS, VRU_WORD_CHARS, 0))
+            folded[w * VRU_WORD_CHARS] = '\0';
+        n = vru_char_offsets(folded + w * VRU_WORD_CHARS, offsets);
+        for (i = 0; i < n; i++)
+        {
+            for (j = i + 1; j <= n; j++)
+            {
+                piece_count++;
+                bytes += 2 * (offsets[j] - offsets[i] + 1);
+            }
+        }
+    }
+
+    if (piece_count > 0)
+    {
+        pieces = (struct vru_piece*)malloc(piece_count * sizeof(pieces[0]));
+        blob = (char*)malloc(bytes);
+    }
+    if (pieces == NULL || blob == NULL)
+    {
+        free(pieces);
+        free(blob);
+        free(folded);
+        fclose(file);
+        return 0;
+    }
+
+    piece_count = 0;
+    for (w = 0; w < count; w++)
+    {
+        const char* word = folded + w * VRU_WORD_CHARS;
+        size_t offsets[VRU_WORD_CHARS + 1];
+        int n = vru_char_offsets(word, offsets), i, j;
+
+        for (i = 0; i < n; i++)
+        {
+            for (j = i + 1; j <= n; j++)
+            {
+                size_t length = offsets[j] - offsets[i];
+                struct vru_piece* piece = &pieces[piece_count++];
+                piece->text = blob + at;
+                memcpy(piece->text, word + offsets[i], length);
+                piece->text[length] = '\0';
+                at += length + 1;
+                piece->spelling = blob + at;
+                piece->spelling[0] = '\0';
+                at += length + 1;
+                piece->katakana = 0;
+            }
+        }
+    }
+
+    qsort(pieces, piece_count, sizeof(pieces[0]), vru_piece_order);
+    for (p = 0, kept = 0; p < piece_count; p++)
+    {
+        if (kept == 0 || strcmp(pieces[kept - 1].text, pieces[p].text) != 0)
+            pieces[kept++] = pieces[p];
+    }
+    piece_count = kept;
+
+    /* Each line is "<word> <id>". */
+    while (fgets(line, sizeof(line), file) != NULL)
+    {
+        char key[VRU_WORD_CHARS];
+        char* end = strchr(line, ' ');
+        struct vru_piece* piece;
+        size_t length;
+        int katakana;
+
+        if (end == NULL)
+            continue;
+        *end = '\0';
+        length = (size_t)(end - line);
+        if (length >= sizeof(key) || !vru_recognizer_fold_kana(line, key, sizeof(key), 0)
+            || strlen(key) != length)
+            continue;
+
+        piece = (struct vru_piece*)bsearch(key, pieces, piece_count, sizeof(pieces[0]),
+                                           vru_piece_compare);
+        if (piece == NULL)
+            continue;
+
+        katakana = (strcmp(line, key) == 0);
+        if (piece->spelling[0] == '\0' || (katakana && !piece->katakana))
+        {
+            memcpy(piece->spelling, line, length + 1);
+            piece->katakana = katakana;
+        }
+    }
+    fclose(file);
+
+    for (w = 0; w < count; w++)
+    {
+        const char* word = folded + w * VRU_WORD_CHARS;
+        size_t offsets[VRU_WORD_CHARS + 1];
+        int fewest[VRU_WORD_CHARS + 1];
+        int from[VRU_WORD_CHARS + 1];
+        const char* spelling[VRU_WORD_CHARS + 1];
+        int chain[VRU_WORD_CHARS + 1];
+        int n = vru_char_offsets(word, offsets), i, j, links = 0;
+        size_t written = 0;
+        int fits = 1;
+
+        if (n == 0)
+            continue;
+
+        fewest[0] = 0;
+        for (j = 1; j <= n; j++)
+        {
+            fewest[j] = -1;
+            for (i = 0; i < j; i++)
+            {
+                char stretch[VRU_WORD_CHARS];
+                size_t length = offsets[j] - offsets[i];
+                const struct vru_piece* piece;
+
+                if (fewest[i] < 0 || (fewest[j] >= 0 && fewest[i] + 1 >= fewest[j]))
+                    continue;
+                memcpy(stretch, word + offsets[i], length);
+                stretch[length] = '\0';
+                piece = (const struct vru_piece*)bsearch(stretch, pieces, piece_count,
+                                                         sizeof(pieces[0]), vru_piece_compare);
+                if (piece == NULL || piece->spelling[0] == '\0')
+                    continue;
+                fewest[j] = fewest[i] + 1;
+                from[j] = i;
+                spelling[j] = piece->spelling;
+            }
+        }
+        if (fewest[n] < 0)
+            continue;
+
+        for (j = n; j > 0; j = from[j])
+            chain[links++] = j;
+
+        while (links-- > 0)
+        {
+            const char* piece = spelling[chain[links]];
+            size_t length = strlen(piece);
+            if (written + length + 2 > VRU_PHRASE_CHARS)
+            {
+                fits = 0;
+                break;
+            }
+            if (written > 0)
+                phrases[w][written++] = ' ';
+            memcpy(phrases[w] + written, piece, length);
+            written += length;
+        }
+        phrases[w][fits ? written : 0] = '\0';
+        if (fits)
+            spelled++;
+    }
+
+    free(pieces);
+    free(blob);
+    free(folded);
+    return spelled;
+}
+
+int vru_recognizer_segment(const char* words_path, const char* text, char* phrase, size_t size)
+{
+    char phrases[1][VRU_PHRASE_CHARS];
+    const char* texts[1];
+    int spelled;
+
+    texts[0] = text;
+    spelled = vru_segment_words(words_path, texts, 1, phrases);
+    snprintf(phrase, size, "%s", phrases[0]);
+    return spelled;
 }
 
 /* ------------------------------------------------------------------ */
 /* the grammar                                                        */
 /* ------------------------------------------------------------------ */
 
-static char* vru_build_grammar(int* japanese)
+static char* vru_build_grammar(char phrases[][VRU_PHRASE_CHARS], int count)
 {
     size_t size = 32;
     char* json;
     size_t at = 0;
     int i;
-    int nonascii = 0;
 
-    for (i = 0; i < g_vru.word_count; i++)
-        size += strlen(g_vru.words[i].text) * 2 + 4;
+    for (i = 0; i < count; i++)
+        size += strlen(phrases[i]) * 2 + 4;
 
     json = (char*)malloc(size);
     if (json == NULL)
         return NULL;
 
     json[at++] = '[';
-    for (i = 0; i < g_vru.word_count; i++)
+    for (i = 0; i < count; i++)
     {
-        const char* text = g_vru.words[i].text;
+        const char* text = phrases[i];
+        if (*text == '\0')
+            continue;
         json[at++] = '"';
         while (*text != '\0')
         {
             if (*text == '"' || *text == '\\')
                 json[at++] = '\\';
-            if ((unsigned char)*text >= 0x80)
-                nonascii = 1;
             json[at++] = *text++;
         }
         json[at++] = '"';
@@ -416,19 +818,88 @@ static char* vru_build_grammar(int* japanese)
     /* vosk wants somewhere to put what it heard that was not asked for. */
     at += snprintf(json + at, size - at, "\"[unk]\"]");
 
-    *japanese = nonascii;
     return json;
+}
+
+/* For a Japanese model, each word becomes the lexicon words that spell it, and
+ * the match key those words fold to. A word none of them spell is given to
+ * Vosk as nothing, and can never match. */
+static void vru_spell_japanese(char phrases[][VRU_PHRASE_CHARS], int count)
+{
+    const char* texts[VRU_MAX_WORDS];
+    char path[1024];
+    int spelled, i;
+
+    for (i = 0; i < count; i++)
+        texts[i] = g_vru.grammar[i].text;
+
+    vru_path(path, sizeof(path), "model-ja/graph/words.txt");
+    spelled = vru_segment_words(path, texts, count, phrases);
+    if (spelled < 0)
+    {
+        DebugMessage(M64MSG_WARNING,
+                     "VRU: no word list at \"%s\"; a word model-ja does not know whole will not be heard",
+                     path);
+        for (i = 0; i < count; i++)
+            snprintf(phrases[i], VRU_PHRASE_CHARS, "%s", texts[i]);
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        struct vru_grammar_word* word = &g_vru.grammar[i];
+
+        if (word->text[0] == '\0')
+            continue;
+
+        if (phrases[i][0] == '\0'
+            || !vru_recognizer_fold_kana(phrases[i], word->key + 1, sizeof(word->key) - 2, 1))
+        {
+            word->key[0] = '\0';
+            if (g_opt.verbose)
+                DebugMessage(M64MSG_WARNING,
+                             "VRU: word %d \"%s\" is not spelled by model-ja's words; it cannot be heard",
+                             word->slot, word->text);
+            continue;
+        }
+        word->key[0] = ' ';
+        strcat(word->key, " ");
+
+        /* One line a word: a grammar logged whole is cut off at the core's
+         * message buffer long before a Japanese list ends. */
+        if (g_opt.verbose)
+            DebugMessage(M64MSG_WARNING, "VRU: word %d \"%s\" as \"%s\"",
+                         word->slot, word->text, phrases[i]);
+    }
 }
 
 static void vru_rebuild_recognizer(void)
 {
+    char (*phrases)[VRU_PHRASE_CHARS];
     char* grammar;
     int japanese = 0;
+    int count, i;
     float rate = (float)VRU_CAPTURE_RATE;
 
-    grammar = vru_build_grammar(&japanese);
-    if (grammar == NULL)
-        return;
+    pthread_mutex_lock(&g_vru.lock);
+    count = (g_vru.word_count < VRU_MAX_WORDS) ? g_vru.word_count : VRU_MAX_WORDS;
+    for (i = 0; i < count; i++)
+    {
+        memcpy(g_vru.grammar[i].text, g_vru.words[i].text, sizeof(g_vru.grammar[i].text));
+        g_vru.grammar[i].slot = g_vru.words[i].slot;
+        g_vru.grammar[i].key[0] = '\0';
+    }
+    pthread_mutex_unlock(&g_vru.lock);
+    g_vru.grammar_count = count;
+
+    for (i = 0; i < count && !japanese; i++)
+    {
+        const char* text;
+        for (text = g_vru.grammar[i].text; *text != '\0'; text++)
+        {
+            if ((unsigned char)*text >= 0x80)
+                japanese = 1;
+        }
+    }
 
     if (g_opt.forced_language == 1)
         japanese = 0;
@@ -436,24 +907,41 @@ static void vru_rebuild_recognizer(void)
         japanese = 1;
 
     if (!vru_load_model(japanese))
-    {
-        free(grammar);
         return;
-    }
+    g_vru.grammar_japanese = japanese;
 
+    /* The recognizer goes whatever happens next: it was built for a list the
+     * copy above has already replaced. */
     if (g_vru.recognizer != NULL)
     {
         g_vru.fn.recognizer_free(g_vru.recognizer);
         g_vru.recognizer = NULL;
     }
 
+    phrases = (char (*)[VRU_PHRASE_CHARS])calloc((size_t)(count > 0 ? count : 1), VRU_PHRASE_CHARS);
+    if (phrases == NULL)
+        return;
+
+    if (japanese)
+        vru_spell_japanese(phrases, count);
+    else
+    {
+        for (i = 0; i < count; i++)
+            snprintf(phrases[i], VRU_PHRASE_CHARS, "%s", g_vru.grammar[i].text);
+    }
+
+    grammar = vru_build_grammar(phrases, count);
+    free(phrases);
+    if (grammar == NULL)
+        return;
+
     /* Vosk resamples to its model's rate itself, so it is handed the capture
      * rate rather than a decimated stream. */
     g_vru.recognizer = g_vru.fn.recognizer_new_grm(g_vru.model, rate, grammar);
     if (g_vru.recognizer == NULL && g_vru.fn.recognizer_new != NULL)
     {
-        /* A word outside the model's lexicon takes the whole grammar with it;
-         * an open recognizer still hears the ones that are in it. */
+        /* Vosk leaves a word it has no entry for out of the grammar rather than
+         * failing, so this is a grammar it could not read at all. */
         DebugMessage(M64MSG_WARNING,
                      "VRU: the game's word list would not build a grammar; listening without one");
         g_vru.recognizer = g_vru.fn.recognizer_new(g_vru.model, rate);
@@ -502,13 +990,27 @@ static int vru_collect_alternatives(const char* json, char out[3][256])
     return found;
 }
 
-static int vru_longer_first(const void* a, const void* b)
+struct vru_match
 {
-    const struct vru_word* wa = (const struct vru_word*)a;
-    const struct vru_word* wb = (const struct vru_word*)b;
-    size_t la = strlen(wa->text), lb = strlen(wb->text);
+    const struct vru_grammar_word* word;
+    int                            rank;    /* the best alternative it was heard in */
+};
+
+/* The longest match wins: "pikachu" beats "pika" when both are in the list and
+ * the player said the longer one. Between two of a length -- a Japanese list is
+ * full of spellings like ぴかっちゅ and ぴかっちう -- the one from Vosk's likelier
+ * alternative, and then the lower slot, so the order is never left to qsort. */
+static int vru_match_order(const void* a, const void* b)
+{
+    const struct vru_match* ma = (const struct vru_match*)a;
+    const struct vru_match* mb = (const struct vru_match*)b;
+    size_t la = strlen(ma->word->text), lb = strlen(mb->word->text);
     if (la != lb)
         return (la < lb) ? 1 : -1;
+    if (ma->rank != mb->rank)
+        return (ma->rank > mb->rank) ? 1 : -1;
+    if (ma->word->slot != mb->word->slot)
+        return (ma->word->slot > mb->word->slot) ? 1 : -1;
     return 0;
 }
 
@@ -516,7 +1018,8 @@ static int vru_longer_first(const void* a, const void* b)
 static void vru_publish(const char* json)
 {
     char alternatives[3][256];
-    struct vru_word found[VRU_MAX_MATCHES];
+    char keys[3][VRU_PHRASE_CHARS];
+    struct vru_match found[VRU_MAX_WORDS];
     int alternative_count;
     int found_count = 0;
     int i, j, k;
@@ -528,12 +1031,29 @@ static void vru_publish(const char* json)
 
     alternative_count = vru_collect_alternatives(json, alternatives);
 
-    for (i = 0; i < g_vru.word_count && found_count < VRU_MAX_MATCHES; i++)
+    /* Vosk answers in lexicon words, and one sound can be several of them --
+     * "ピカ チュウ" or "ぴか ちゅう". Folded and matched a whole word at a time,
+     * ぴかってう is not also heard as the かって inside it. */
+    for (j = 0; j < alternative_count && g_vru.grammar_japanese; j++)
     {
+        keys[j][0] = ' ';
+        if (!vru_recognizer_fold_kana(alternatives[j], keys[j] + 1, sizeof(keys[j]) - 2, 1))
+            keys[j][1] = '\0';
+        strcat(keys[j], " ");
+    }
+
+    for (i = 0; i < g_vru.grammar_count; i++)
+    {
+        const struct vru_grammar_word* word = &g_vru.grammar[i];
         int already = 0;
+
+        /* A word that could not be read holds its slot and nothing else. */
+        if (word->text[0] == '\0')
+            continue;
+
         for (j = 0; j < found_count; j++)
         {
-            if (strcmp(found[j].text, g_vru.words[i].text) == 0)
+            if (strcmp(found[j].word->text, word->text) == 0)
                 already = 1;
         }
         if (already)
@@ -541,24 +1061,31 @@ static void vru_publish(const char* json)
 
         for (j = 0; j < alternative_count; j++)
         {
-            if (strstr(alternatives[j], g_vru.words[i].text) != NULL)
+            int heard = g_vru.grammar_japanese
+                ? (word->key[0] != '\0' && strstr(keys[j], word->key) != NULL)
+                : (strstr(alternatives[j], word->text) != NULL);
+            if (heard)
             {
-                found[found_count++] = g_vru.words[i];
+                found[found_count].word = word;
+                found[found_count].rank = j;
+                found_count++;
                 break;
             }
         }
     }
 
-    /* The longest match wins: "pikachu" beats "pika" when both are in the
-     * list and the player said the longer one. */
+    /* Ordered before the reply is cut to five, or the five would be the lowest
+     * slots rather than the best matches. */
     if (found_count > 1)
-        qsort(found, (size_t)found_count, sizeof(found[0]), vru_longer_first);
+        qsort(found, (size_t)found_count, sizeof(found[0]), vru_match_order);
+    if (found_count > VRU_MAX_MATCHES)
+        found_count = VRU_MAX_MATCHES;
 
     for (i = 0, k = 0; i < VRU_MAX_MATCHES; i++)
     {
         if (i < found_count)
         {
-            matches[k++] = (uint16_t)found[i].slot;
+            matches[k++] = (uint16_t)found[i].word->slot;
             matches[k++] = (uint16_t)(i * 256);
         }
         else
@@ -576,8 +1103,12 @@ static void vru_publish(const char* json)
         found_count = 1;
     }
 
-    if (g_opt.verbose && found_count > 0)
-        DebugMessage(M64MSG_WARNING, "VRU: heard \"%s\"", alternatives[0]);
+    if (g_opt.verbose && error == VRU_ERROR_NO_MATCH)
+        DebugMessage(M64MSG_WARNING, "VRU: heard \"%s\", which the game is not listening for",
+                     alternatives[0]);
+    else if (g_opt.verbose && found_count > 0)
+        DebugMessage(M64MSG_WARNING, "VRU: heard \"%s\" as word %d \"%s\"",
+                     alternatives[0], found[0].word->slot, found[0].word->text);
 
     pthread_mutex_lock(&g_vru.lock);
     memcpy(g_vru.result_matches, matches, sizeof(matches));
@@ -637,7 +1168,9 @@ static void* vru_worker(void* unused)
         if (gen != g_vru.grammar_built)
         {
             vru_rebuild_recognizer();
+            pthread_mutex_lock(&g_vru.lock);
             g_vru.grammar_built = gen;
+            pthread_mutex_unlock(&g_vru.lock);
         }
 
         if (g_vru.recognizer == NULL)
@@ -877,6 +1410,16 @@ int vru_recognizer_is_available(void)
     return g_vru.available;
 }
 
+int vru_recognizer_grammar_ready(void)
+{
+    int ready;
+
+    pthread_mutex_lock(&g_vru.lock);
+    ready = (g_vru.grammar_gen == g_vru.grammar_built);
+    pthread_mutex_unlock(&g_vru.lock);
+    return ready;
+}
+
 void vru_recognizer_note_attached(int port, int is_vru)
 {
     if (port < 0 || port > 3)
@@ -1027,32 +1570,35 @@ EXPORT void CALL vru_SendVRUWord(uint16_t length, uint16_t* word, uint8_t lang)
 {
     const char* text;
     char decoded[VRU_WORD_CHARS];
+    unsigned refused = 0;
     int slot;
 
     if (!g_vru.started || word == NULL)
         return;
 
     text = vru_lookup(word, length);
-    if (text == NULL)
-    {
-        if (!vru_decode_text(word, length, decoded, sizeof(decoded)))
-        {
-            if (g_opt.verbose)
-                DebugMessage(M64MSG_WARNING, "VRU: word %d is not in the table", g_vru.word_count);
-            /* Still occupies a slot: the game counts them. */
-            pthread_mutex_lock(&g_vru.lock);
-            g_vru.word_count++;
-            pthread_mutex_unlock(&g_vru.lock);
-            return;
-        }
+    if (text == NULL && vru_recognizer_decode_word(word, length, decoded, sizeof(decoded), &refused))
         text = decoded;
+
+    if (text == NULL && g_opt.verbose)
+    {
+        if (refused != 0)
+            DebugMessage(M64MSG_WARNING,
+                         "VRU: word %d holds Shift-JIS %04X, which is not kana; it cannot be heard",
+                         g_vru.word_count, refused);
+        else
+            DebugMessage(M64MSG_WARNING, "VRU: word %d is not in the table", g_vru.word_count);
     }
 
+    /* A word that cannot be read still takes its slot, because the game counts
+     * them, and is held empty: left alone, the slot would go on hearing the
+     * word the last list had there. It also still completes the list. */
     pthread_mutex_lock(&g_vru.lock);
     slot = g_vru.word_count;
     if (slot < VRU_MAX_WORDS)
     {
-        snprintf(g_vru.words[slot].text, sizeof(g_vru.words[slot].text), "%s", text);
+        snprintf(g_vru.words[slot].text, sizeof(g_vru.words[slot].text), "%s",
+                 (text != NULL) ? text : "");
         g_vru.words[slot].slot = slot;
     }
     g_vru.word_count = slot + 1;
