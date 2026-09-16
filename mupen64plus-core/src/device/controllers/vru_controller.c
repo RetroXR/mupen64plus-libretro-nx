@@ -152,7 +152,9 @@ static void process_vru_command(void* jbd,
         if (cont->load_offset > 0)
         {
             uint8_t offset = 0;
-            while (cont->word[offset] == 0 && offset < 40)
+            /* Bound first: word[] is the last member of the controller, so
+             * testing word[40] reads past the struct. */
+            while (offset < 40 && cont->word[offset] == 0)
                 ++offset;
             if (offset == 40)
             {
