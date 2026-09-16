@@ -1579,6 +1579,11 @@ m64p_error main_run(void)
             joybus_devices[i] = &g_dev.controllers[i];
             ijoybus_devices[i] = &g_ijoybus_vru_controller;
 
+            /* The one line that distinguishes a VRU the game can see from a
+             * VRU a frontend merely asked for. */
+            DebugMessage(M64MSG_WARNING, "Game controller %u (%s) attached",
+                         (uint32_t)i, cont_flavor->name);
+
             l_cin_compats[i].control_id = (int)i;
             l_cin_compats[i].cont = &g_dev.controllers[i];
             l_cin_compats[i].last_pak_type = Controls[i].Plugin;

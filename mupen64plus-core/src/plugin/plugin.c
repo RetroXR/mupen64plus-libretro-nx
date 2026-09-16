@@ -136,6 +136,16 @@ extern void inputReadController(int Control, unsigned char *Command);
 extern int  inputRomOpen(void);
 extern void inputRomClosed(void);
 
+/* The VRU's half of the input plugin. Declared the way the rest of it is,
+ * rather than included, because the definitions live in the libretro build's
+ * own plugin directory. */
+extern void vru_SendVRUWord(uint16_t length, uint16_t *word, uint8_t lang);
+extern void vru_SetMicState(int state);
+extern void vru_ReadVRUResults(uint16_t *error_flags, uint16_t *num_results, uint16_t *mic_level,
+                               uint16_t *voice_level, uint16_t *voice_length, uint16_t *matches);
+extern void vru_ClearVRUWords(uint8_t length);
+extern void vru_SetVRUWordMask(uint8_t length, uint8_t *mask);
+
 
 const input_plugin_functions dummy_input = {
     inputPluginGetVersion,
@@ -148,11 +158,11 @@ const input_plugin_functions dummy_input = {
     dummyinput_SDL_KeyDown,
     dummyinput_SDL_KeyUp,
     dummyinput_RenderCallback,
-    dummy_SendVRUWord,
-    dummy_SetMicState,
-    dummy_ReadVRUResults,
-    dummy_ClearVRUWords,
-    dummy_SetVRUWordMask
+    vru_SendVRUWord,
+    vru_SetMicState,
+    vru_ReadVRUResults,
+    vru_ClearVRUWords,
+    vru_SetVRUWordMask
 };
 
 static AUDIO_INFO audio_info;

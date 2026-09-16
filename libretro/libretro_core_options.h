@@ -1724,6 +1724,85 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "none"
     },
+    {
+        CORE_NAME "-vru-port",
+        "Voice Recognition Unit",
+        NULL,
+        "Put a Voice Recognition Unit in a controller socket. A frontend that announces the device itself does not need this. Both games that listen want socket 4, and it attaches when the game is loaded -- a reset is not enough.",
+        NULL,
+        "input",
+        {
+            {"disabled", NULL},
+            {"1", NULL},
+            {"2", NULL},
+            {"3", NULL},
+            {"4", NULL},
+            { NULL, NULL },
+        },
+        "disabled"
+    },
+    {
+        CORE_NAME "-vru-language",
+        "VRU Language",
+        NULL,
+        "Which speech model listens. Auto reads it from the words the game loads, which is right for both Hey You, Pikachu! and Densha de GO! 64.",
+        NULL,
+        "input",
+        {
+            {"auto", NULL},
+            {"english", NULL},
+            {"japanese", NULL},
+            { NULL, NULL },
+        },
+        "auto"
+    },
+    {
+        CORE_NAME "-vru-mic-mode",
+        "VRU Microphone Mode",
+        NULL,
+        "Push to talk holds the Z button while you speak, as the hardware does.",
+        NULL,
+        "input",
+        {
+            {"push-to-talk", NULL},
+            {"voice-activated", NULL},
+            { NULL, NULL },
+        },
+        "push-to-talk"
+    },
+    {
+        CORE_NAME "-vru-mic-gain",
+        "VRU Microphone Gain",
+        NULL,
+        "Raise it when the game does not hear you, lower it when it hears things you did not say.",
+        NULL,
+        "input",
+        {
+            {"0.5", NULL},
+            {"0.75", NULL},
+            {"1.0", NULL},
+            {"1.5", NULL},
+            {"2.0", NULL},
+            {"3.0", NULL},
+            {"4.0", NULL},
+            { NULL, NULL },
+        },
+        "1.0"
+    },
+    {
+        CORE_NAME "-vru-log",
+        "VRU Logging",
+        NULL,
+        "Log the word list the game loads and what the recognizer heard.",
+        NULL,
+        "input",
+        {
+            {"disabled", NULL},
+            {"enabled", NULL},
+            { NULL, NULL },
+        },
+        "disabled"
+    },
     { NULL, NULL, NULL, NULL, NULL, NULL, {{0}}, NULL },
 };
 

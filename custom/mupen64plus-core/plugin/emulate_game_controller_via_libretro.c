@@ -21,6 +21,7 @@
 
 #include "emulate_game_controller_via_input_plugin.h"
 #include "plugin/plugin.h"
+#include "plugin/vru_recognizer.h"
 
 #include "api/m64p_plugin.h"
 #include "device/controllers/game_controller.h"
@@ -40,6 +41,7 @@ extern retro_input_state_t input_cb;
 extern struct retro_rumble_interface rumble;
 extern int pad_pak_types[4];
 extern int pad_present[4];
+extern int pad_types[4];
 extern int astick_deadzone;
 extern int astick_sensitivity;
 extern int r_cbutton;
@@ -379,6 +381,13 @@ void inputGetKeys_default( int Control, BUTTONS *Keys )
       Keys->Value |= (analogY < 0) ? CSTICK_UP : CSTICK_DOWN;
 
    inputGetKeys_reuse(analogX, analogY, Control, Keys);
+
+   /* On a VRU, Z does not mean Z: the game reads it to know someone is
+    * talking, and times the utterance by how long it is held. Push-to-talk
+    * passes the player's own Z through and tells the recognizer where the
+    * utterance begins and ends; voice-activated lets the recognizer raise it. */
+   if (Control >= 0 && Control < 4 && pad_types[Control] == CONT_TYPE_VRU)
+      Keys->Z_TRIG = vru_recognizer_talking(Control, Keys->Z_TRIG);
 }
 
 
@@ -400,6 +409,11 @@ EXPORT void CALL inputInitiateControllers(CONTROL_INFO ControlInfo)
        controller[i].control = ControlInfo.Controls + i;
        controller[i].control->Present = pad_present[i];
        controller[i].control->RawData = 0;
+       /* plugin_start_input has just stamped every port CONT_TYPE_STANDARD,
+        * and the joybus channels are built from these values moments from
+        * now -- so this is the only place a VRU can be asked for. */
+       controller[i].control->Type = pad_types[i];
+       vru_recognizer_note_attached(i, pad_types[i] == CONT_TYPE_VRU);
 
        if (pad_pak_types[i] == PLUGIN_MEMPAK)
           controller[i].control->Plugin = PLUGIN_MEMPAK;

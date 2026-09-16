@@ -45,6 +45,7 @@
 
 #include "api/m64p_frontend.h"
 #include "api/m64p_types.h"
+#include "plugin/vru_recognizer.h"
 #include "device/r4300/r4300_core.h"
 #include "device/memory/memory.h"
 #include "main/main.h"
@@ -288,19 +289,40 @@ extern struct
 int pad_pak_types[4];
 int pad_present[4] = {1, 1, 1, 1};
 
+/* A Voice Recognition Unit, as libretro counts devices. A subclass of JOYPAD
+ * rather than a device of its own so the ordinary pad path still delivers Z,
+ * which is what a game watches to know someone is talking. */
+#define RETRO_DEVICE_N64_VRU RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_JOYPAD, 0)
+
+/* What each port IS, as the core counts controller flavors. Read by
+ * inputInitiateControllers, which runs after plugin_start_input has stamped
+ * every port CONT_TYPE_STANDARD and before the joybus channels are built --
+ * the one window in which this can be set. */
+int pad_types[4] = {CONT_TYPE_STANDARD, CONT_TYPE_STANDARD, CONT_TYPE_STANDARD, CONT_TYPE_STANDARD};
+
 static void n64DebugCallback(void* aContext, int aLevel, const char* aMessage)
 {
     char buffer[1024];
     snprintf(buffer, 1024, CORE_NAME ": %s\n", aMessage);
     if (log_cb)
-        log_cb(RETRO_LOG_INFO, buffer);
+    {
+        /* Carry the core's own level across. Sent at RETRO_LOG_INFO, which
+         * frontends routinely drop, every warning the core raises -- an
+         * out-of-bound read, an unknown device, an unimplemented path -- was
+         * invisible to whatever was reading the log. */
+        enum retro_log_level level;
+        switch (aLevel)
+        {
+            case M64MSG_ERROR:   level = RETRO_LOG_ERROR; break;
+            case M64MSG_WARNING: level = RETRO_LOG_WARN;  break;
+            case M64MSG_VERBOSE: level = RETRO_LOG_DEBUG; break;
+            default:             level = RETRO_LOG_INFO;  break;
+        }
+        log_cb(level, buffer);
+    }
 
-    /* Everything the core has to say arrives here at RETRO_LOG_INFO, which
-     * frontends routinely drop -- so the warnings that matter when something is
-     * wrong (out-of-bound reads, unknown devices, unimplemented paths) are
-     * invisible, and diagnosing anything meant rebuilding with fprintf added by
-     * hand. Mirror to stderr when M64P_VERBOSE is set; opt-in, so normal runs
-     * stay quiet. */
+    /* Mirror to stderr when M64P_VERBOSE is set; opt-in, so normal runs stay
+     * quiet. */
     {
         static int verbose = -1;
         if (verbose < 0)
@@ -407,13 +429,16 @@ static void setup_variables(void)
     static const struct retro_controller_description port[] = {
         { "Controller", RETRO_DEVICE_JOYPAD },
         { "RetroPad", RETRO_DEVICE_JOYPAD },
+        { "Voice Recognition Unit", RETRO_DEVICE_N64_VRU },
     };
 
+    /* One table serves all four ports, so the VRU is offered on each. Only
+     * socket 4 is any use: both games that listen look for it there. */
     static const struct retro_controller_info ports[] = {
-        { port, 2 },
-        { port, 2 },
-        { port, 2 },
-        { port, 2 },
+        { port, 3 },
+        { port, 3 },
+        { port, 3 },
+        { port, 3 },
         { 0, 0 }
     };
 
@@ -1075,6 +1100,46 @@ void update_controllers()
             controller[3].control->Plugin = p4_pak;
         else
             pad_pak_types[3] = p4_pak;
+    }
+
+    /* The Voice Recognition Unit. A frontend that announces the device on a
+     * port needs none of this; -vru-port is for the ones that cannot. */
+    {
+        const char* vru_language = "auto";
+        const char* vru_mic_mode = "push-to-talk";
+        float vru_gain = 1.0f;
+        int vru_verbose = 0;
+
+        var.key = CORE_NAME "-vru-port";
+        var.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+        {
+            int wanted = atoi(var.value);
+            if (wanted >= 1 && wanted <= 4)
+                pad_types[wanted - 1] = CONT_TYPE_VRU;
+        }
+
+        var.key = CORE_NAME "-vru-language";
+        var.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            vru_language = var.value;
+
+        var.key = CORE_NAME "-vru-mic-mode";
+        var.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            vru_mic_mode = var.value;
+
+        var.key = CORE_NAME "-vru-mic-gain";
+        var.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            vru_gain = (float)atof(var.value);
+
+        var.key = CORE_NAME "-vru-log";
+        var.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            vru_verbose = !strcmp(var.value, "enabled");
+
+        vru_recognizer_set_options(vru_language, vru_mic_mode, vru_gain, vru_verbose);
     }
 
     var.key = CORE_NAME "-astick-deadzone";
@@ -2138,6 +2203,10 @@ static bool load_game_internal(const struct retro_game_info *game, bool is_disk)
 
     load_as_disk = is_disk;
 
+    /* Costs nothing until a port is actually a VRU: no library, no model, no
+     * microphone until then. */
+    vru_recognizer_init(retro_get_system_directory());
+
     if(load_as_disk)
     {
         /* open_disk() and load_dd_disk() take a filename, not a buffer. */
@@ -2285,6 +2354,10 @@ static bool load_game_internal(const struct retro_game_info *game, bool is_disk)
 
 void retro_unload_game(void)
 {
+    /* Before the core stops: the worker holds the model, and the model is
+     * most of a third of a gigabyte. */
+    vru_recognizer_close();
+
     if(current_rdp_type == RDP_PLUGIN_GLIDEN64 && EnableThreadedRenderer)
     {
        environ_clear_thread_waits_cb(1, NULL);
@@ -2325,6 +2398,10 @@ void retro_run (void)
 
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
        update_variables(false);
+
+    /* Every microphone call belongs to this thread, so the capture is taken
+     * here and handed to the recognizer's own. */
+    vru_recognizer_pump();
 
     if(current_rdp_type == RDP_PLUGIN_GLIDEN64)
     {
@@ -2453,6 +2530,10 @@ bool retro_unserialize(const void *data, size_t size)
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 
+   /* A state carries no VRU state, so whatever word list the recognizer is
+    * holding is no longer the one the restored game believes in. */
+   vru_recognizer_reset_words();
+
    savestates_set_job(savestates_job_load, savestates_type_m64p, data);
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
@@ -2493,8 +2574,23 @@ void retro_set_controller_port_device(unsigned in_port, unsigned device) {
                    break;
                }
 
+            case RETRO_DEVICE_N64_VRU:
+               /* Takes effect when the joybus channels are built, which is a
+                * content load -- a reset does not rebuild them. Said once, on
+                * the frame after the machine starts, by vru_recognizer_pump. */
+               pad_types[in_port] = CONT_TYPE_VRU;
+               pad_present[in_port] = 1;
+               if (controller[in_port].control){
+                   controller[in_port].control->Present = 1;
+                   controller[in_port].control->Type = CONT_TYPE_VRU;
+               }
+               break;
+
             case RETRO_DEVICE_JOYPAD:
             default:
+               /* An id this core does not know is a pad, which is how every
+                * other frontend's idea of a controller keeps working. */
+               pad_types[in_port] = CONT_TYPE_STANDARD;
                if (controller[in_port].control){
                    controller[in_port].control->Present = 1;
                    break;
