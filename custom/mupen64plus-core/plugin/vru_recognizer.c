@@ -686,6 +686,31 @@ static void vru_stop_worker(void)
     g_vru.worker_running = 0;
 }
 
+/* Give the model back. Without a microphone there is nothing to decode, and a
+ * loaded model is most of a third of a gigabyte. */
+static void vru_stop_engine(void)
+{
+    vru_stop_worker();
+
+    if (g_vru.lib != NULL)
+    {
+        if (g_vru.recognizer != NULL)
+            g_vru.fn.recognizer_free(g_vru.recognizer);
+        if (g_vru.model != NULL)
+            g_vru.fn.model_free(g_vru.model);
+        vru_dlclose(g_vru.lib);
+    }
+    g_vru.recognizer = NULL;
+    g_vru.model = NULL;
+    g_vru.lib = NULL;
+    g_vru.model_loaded[0] = '\0';
+
+    free(g_vru.ring);
+    g_vru.ring = NULL;
+    g_vru.ring_head = 0;
+    g_vru.ring_fill = 0;
+}
+
 void vru_recognizer_close(void)
 {
     if (!g_vru.started)
@@ -742,6 +767,9 @@ static int vru_any_port(void)
     }
     return -1;
 }
+
+static void vru_stop_worker(void);
+static void vru_stop_engine(void);
 
 /* The library, the ring and the worker: everything except the microphone. */
 static int vru_start_engine(void)
@@ -805,6 +833,7 @@ static int vru_start(void)
     {
         DebugMessage(M64MSG_WARNING, "VRU: the frontend would not open a microphone");
         g_vru.load_failed = 1;
+        vru_stop_engine();
         return 0;
     }
     if (g_vru.mic_iface.get_params != NULL && g_vru.mic_iface.get_params(g_vru.mic, &params))
