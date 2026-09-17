@@ -38,12 +38,12 @@ void vru_recognizer_pump(void);
  * recognizer is holding is no longer the one the game believes in. */
 void vru_recognizer_reset_words(void);
 
-void vru_recognizer_set_options(const char* language, const char* mic_mode,
-                                float gain, int verbose);
+void vru_recognizer_set_options(const char* language, float gain, int verbose);
 
-/* Z on a VRU port is not Z: the game reads it to know someone is talking, and
- * times the utterance by how long it is held. Returns what the core should
- * see, and marks the beginning and end of an utterance. */
+/* Z on a VRU port is not Z: vru_controller.c reads it to know someone is
+ * talking. It is raised for exactly as long as the game has told the unit to
+ * listen, which is what Rosalie's Mupen GUI and simple64 do; `held`, the
+ * player's own Z on that port, is ignored. */
 int vru_recognizer_talking(int port, int held);
 
 /* Said by inputInitiateControllers for each port as the joybus channels are

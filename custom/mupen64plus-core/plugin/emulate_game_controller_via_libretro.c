@@ -382,10 +382,9 @@ void inputGetKeys_default( int Control, BUTTONS *Keys )
 
    inputGetKeys_reuse(analogX, analogY, Control, Keys);
 
-   /* On a VRU, Z does not mean Z: the game reads it to know someone is
-    * talking, and times the utterance by how long it is held. Push-to-talk
-    * passes the player's own Z through and tells the recognizer where the
-    * utterance begins and ends; voice-activated lets the recognizer raise it. */
+   /* On a VRU, Z does not mean Z: vru_controller.c reads it to know someone is
+    * talking, and the recognizer raises it for as long as the game is
+    * listening. */
    if (Control >= 0 && Control < 4 && pad_types[Control] == CONT_TYPE_VRU)
       Keys->Z_TRIG = vru_recognizer_talking(Control, Keys->Z_TRIG);
 }

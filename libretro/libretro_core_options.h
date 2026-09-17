@@ -1725,23 +1725,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         "none"
     },
     {
-        CORE_NAME "-vru-port",
-        "Voice Recognition Unit",
-        NULL,
-        "Put a Voice Recognition Unit in a controller socket. A frontend that announces the device itself does not need this. Both games that listen want socket 4, and it attaches when the game is loaded -- a reset is not enough.",
-        NULL,
-        "input",
-        {
-            {"disabled", NULL},
-            {"1", NULL},
-            {"2", NULL},
-            {"3", NULL},
-            {"4", NULL},
-            { NULL, NULL },
-        },
-        "disabled"
-    },
-    {
         CORE_NAME "-vru-language",
         "VRU Language",
         NULL,
@@ -1755,20 +1738,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
             { NULL, NULL },
         },
         "auto"
-    },
-    {
-        CORE_NAME "-vru-mic-mode",
-        "VRU Microphone Mode",
-        NULL,
-        "Push to talk holds the Z button while you speak, as the hardware does.",
-        NULL,
-        "input",
-        {
-            {"push-to-talk", NULL},
-            {"voice-activated", NULL},
-            { NULL, NULL },
-        },
-        "push-to-talk"
     },
     {
         CORE_NAME "-vru-mic-gain",

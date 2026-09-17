@@ -1115,32 +1115,17 @@ void update_controllers()
             pad_pak_types[3] = p4_pak;
     }
 
-    /* The Voice Recognition Unit. A frontend that announces the device on a
-     * port needs none of this; -vru-port is for the ones that cannot. */
+    /* The Voice Recognition Unit. Which socket holds one is the port's device,
+     * "Voice Recognition Unit" in the controller list, not an option. */
     {
         const char* vru_language = "auto";
-        const char* vru_mic_mode = "push-to-talk";
         float vru_gain = 1.0f;
         int vru_verbose = 0;
-
-        var.key = CORE_NAME "-vru-port";
-        var.value = NULL;
-        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-        {
-            int wanted = atoi(var.value);
-            if (wanted >= 1 && wanted <= 4)
-                pad_types[wanted - 1] = CONT_TYPE_VRU;
-        }
 
         var.key = CORE_NAME "-vru-language";
         var.value = NULL;
         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
             vru_language = var.value;
-
-        var.key = CORE_NAME "-vru-mic-mode";
-        var.value = NULL;
-        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-            vru_mic_mode = var.value;
 
         var.key = CORE_NAME "-vru-mic-gain";
         var.value = NULL;
@@ -1152,7 +1137,7 @@ void update_controllers()
         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
             vru_verbose = !strcmp(var.value, "enabled");
 
-        vru_recognizer_set_options(vru_language, vru_mic_mode, vru_gain, vru_verbose);
+        vru_recognizer_set_options(vru_language, vru_gain, vru_verbose);
     }
 
     var.key = CORE_NAME "-astick-deadzone";

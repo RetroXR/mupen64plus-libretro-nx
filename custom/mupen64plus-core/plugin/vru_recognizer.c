@@ -70,7 +70,9 @@
 #define VRU_PHRASE_CHARS    (VRU_WORD_CHARS * 2 + 3)
 #define VRU_CAPTURE_RATE    48000
 #define VRU_RING_SECONDS    8
-#define VRU_RESULT_WAIT_MS  250
+/* Bounds the wait for an utterance's decode when the game asks for its result,
+ * which is the moment the game stops listening. */
+#define VRU_RESULT_WAIT_MS  3000
 
 extern retro_environment_t environ_cb;
 extern int pad_types[4];
@@ -123,9 +125,8 @@ static struct
 {
     int   verbose;
     int   forced_language;     /* 0 auto, 1 english, 2 japanese */
-    int   voice_activated;
     float gain;
-} g_opt = {0, 0, 0, 1.0f};
+} g_opt = {0, 0, 1.0f};
 
 static struct
 {
@@ -179,6 +180,10 @@ static struct
 
     int listening;
     int decode_pending;
+    /* What the game last told the unit: listen, or stop. */
+    int game_listening;
+    /* From the game's stop until that utterance's result is published. */
+    int decode_outstanding;
     int result_ready;
     int result_error;
     int result_count;
@@ -1115,6 +1120,7 @@ static void vru_publish(const char* json)
     g_vru.result_count = found_count;
     g_vru.result_error = error;
     g_vru.result_ready = 1;
+    g_vru.decode_outstanding = 0;
     pthread_mutex_unlock(&g_vru.lock);
 }
 
@@ -1174,7 +1180,16 @@ static void* vru_worker(void* unused)
         }
 
         if (g_vru.recognizer == NULL)
+        {
+            /* No model or no list: there will be no result to wait for. */
+            if (decode)
+            {
+                pthread_mutex_lock(&g_vru.lock);
+                g_vru.decode_outstanding = 0;
+                pthread_mutex_unlock(&g_vru.lock);
+            }
             continue;
+        }
 
         if (take > 0)
             g_vru.fn.accept_waveform_s(g_vru.recognizer, block, (int)take);
@@ -1184,6 +1199,12 @@ static void* vru_worker(void* unused)
             const char* json = g_vru.fn.final_result(g_vru.recognizer);
             if (json != NULL)
                 vru_publish(json);
+            else
+            {
+                pthread_mutex_lock(&g_vru.lock);
+                g_vru.decode_outstanding = 0;
+                pthread_mutex_unlock(&g_vru.lock);
+            }
             g_vru.fn.reset(g_vru.recognizer);
         }
     }
@@ -1278,8 +1299,7 @@ void vru_recognizer_close(void)
     g_vru.started = 0;
 }
 
-void vru_recognizer_set_options(const char* language, const char* mic_mode,
-                                float gain, int verbose)
+void vru_recognizer_set_options(const char* language, float gain, int verbose)
 {
     g_opt.forced_language = 0;
     if (language != NULL && strcmp(language, "english") == 0)
@@ -1287,7 +1307,6 @@ void vru_recognizer_set_options(const char* language, const char* mic_mode,
     else if (language != NULL && strcmp(language, "japanese") == 0)
         g_opt.forced_language = 2;
 
-    g_opt.voice_activated = (mic_mode != NULL && strcmp(mic_mode, "voice-activated") == 0);
     g_opt.gain = (gain > 0.0f) ? gain : 1.0f;
     g_opt.verbose = verbose;
 }
@@ -1509,6 +1528,10 @@ void vru_recognizer_reset_words(void)
     g_vru.result_count = 0;
     g_vru.ring_head = 0;
     g_vru.ring_fill = 0;
+    g_vru.listening = 0;
+    g_vru.game_listening = 0;
+    g_vru.decode_pending = 0;
+    g_vru.decode_outstanding = 0;
     pthread_mutex_unlock(&g_vru.lock);
 }
 
@@ -1518,40 +1541,17 @@ void vru_recognizer_reset_words(void)
 
 int vru_recognizer_talking(int port, int held)
 {
-    static int was_held[4];
-    int talking = held;
+    int talking;
 
     (void)port;
+    (void)held;
 
-    if (!g_vru.available)
-        return held;
+    if (!g_vru.started)
+        return 0;
 
-    if (g_opt.voice_activated)
-    {
-        /* Not implemented as a detector yet: the player's own Z still works,
-         * so this degrades to push-to-talk rather than to silence. */
-        talking = held;
-    }
-
-    if (talking && !was_held[port & 3])
-    {
-        pthread_mutex_lock(&g_vru.lock);
-        g_vru.listening = 1;
-        g_vru.result_ready = 0;
-        g_vru.ring_head = 0;
-        g_vru.ring_fill = 0;
-        pthread_mutex_unlock(&g_vru.lock);
-    }
-    else if (!talking && was_held[port & 3])
-    {
-        pthread_mutex_lock(&g_vru.lock);
-        g_vru.listening = 0;
-        g_vru.decode_pending = 1;
-        pthread_cond_signal(&g_vru.wake);
-        pthread_mutex_unlock(&g_vru.lock);
-    }
-
-    was_held[port & 3] = talking;
+    pthread_mutex_lock(&g_vru.lock);
+    talking = g_vru.game_listening;
+    pthread_mutex_unlock(&g_vru.lock);
     return talking;
 }
 
@@ -1614,19 +1614,43 @@ EXPORT void CALL vru_SendVRUWord(uint16_t length, uint16_t* word, uint8_t lang)
     (void)lang;
 }
 
+/* The game's own "listen" and "stop", which Hey You, Pikachu! sends while the
+ * player holds the controller's Z. The utterance is exactly what the microphone
+ * heard in between: the start throws away anything captured before it, and the
+ * stop keeps what is still queued, because the game asks for the result as soon
+ * as it has stopped listening. */
 EXPORT void CALL vru_SetMicState(int state)
 {
+    int changed;
+
     if (!g_vru.started)
         return;
 
+    state = (state != 0);
     pthread_mutex_lock(&g_vru.lock);
-    if (!state)
+    changed = (state != g_vru.game_listening);
+    g_vru.game_listening = state;
+    if (changed && state)
+    {
+        g_vru.listening = 1;
+        g_vru.result_ready = 0;
+        g_vru.ring_head = 0;
+        g_vru.ring_fill = 0;
+    }
+    else if (changed)
     {
         g_vru.listening = 0;
-        g_vru.ring_fill = 0;
-        g_vru.ring_head = 0;
+        if (g_vru.available)
+        {
+            g_vru.decode_pending = 1;
+            g_vru.decode_outstanding = 1;
+        }
+        pthread_cond_signal(&g_vru.wake);
     }
     pthread_mutex_unlock(&g_vru.lock);
+
+    if (changed && g_opt.verbose)
+        DebugMessage(M64MSG_WARNING, "VRU: the game %s listening", state ? "started" : "stopped");
 }
 
 EXPORT void CALL vru_ReadVRUResults(uint16_t* error_flags, uint16_t* num_results,
@@ -1637,6 +1661,12 @@ EXPORT void CALL vru_ReadVRUResults(uint16_t* error_flags, uint16_t* num_results
     int ready = 0;
     int i;
 
+    /* Every field is written on every read. These point into the joybus reply,
+     * which still holds whatever was there before, and a field left alone is a
+     * field the game reads as stale bytes: error flags left over as 0xFE78 carry
+     * both the decode-failed and the no-match bit. */
+    if (error_flags != NULL)
+        *error_flags = 0;
     if (num_results != NULL)
         *num_results = 0;
     if (mic_level != NULL)
@@ -1657,21 +1687,29 @@ EXPORT void CALL vru_ReadVRUResults(uint16_t* error_flags, uint16_t* num_results
     if (!g_vru.started || !g_vru.available)
         return;
 
-    /* The game asks the moment it stops listening, so give the worker the tail
-     * of the utterance rather than reporting silence. */
+    /* The game asks the moment it stops listening, while the worker is still
+     * decoding what was said; Rosalie's Mupen GUI and simple64 decode right
+     * here, so the game is held for that long either way. */
     for (;;)
     {
+        int outstanding;
         pthread_mutex_lock(&g_vru.lock);
         ready = g_vru.result_ready;
+        outstanding = g_vru.decode_outstanding;
         pthread_mutex_unlock(&g_vru.lock);
-        if (ready || waited >= VRU_RESULT_WAIT_MS)
+        if (ready || !outstanding || waited >= VRU_RESULT_WAIT_MS)
             break;
         retro_sleep(10);
         waited += 10;
     }
 
     if (!ready)
+    {
+        if (g_opt.verbose)
+            DebugMessage(M64MSG_WARNING, "VRU: the game asked for a result and there was none (%d ms)",
+                         waited);
         return;
+    }
 
     pthread_mutex_lock(&g_vru.lock);
     if (matches != NULL)
@@ -1682,6 +1720,12 @@ EXPORT void CALL vru_ReadVRUResults(uint16_t* error_flags, uint16_t* num_results
         *error_flags = (uint16_t)g_vru.result_error;
     g_vru.result_ready = 0;
     pthread_mutex_unlock(&g_vru.lock);
+
+    if (g_opt.verbose)
+        DebugMessage(M64MSG_WARNING, "VRU: the game read %u result(s), first slot %u, flags %04X (%d ms)",
+                     (num_results != NULL) ? *num_results : 0,
+                     (matches != NULL) ? matches[0] : 0,
+                     (error_flags != NULL) ? *error_flags : 0, waited);
 }
 
 EXPORT void CALL vru_SetVRUWordMask(uint8_t length, uint8_t* mask)

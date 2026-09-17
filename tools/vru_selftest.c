@@ -295,7 +295,7 @@ static void test_recognizer(const char* group, const char* system_dir,
     int i, u;
 
     if (getenv("VRU_VERBOSE") != NULL)
-        vru_recognizer_set_options("auto", "push-to-talk", 1.0f, 1);
+        vru_recognizer_set_options("auto", 1.0f, 1);
 
     if (!vru_recognizer_start_offline(system_dir))
     {
@@ -317,7 +317,10 @@ static void test_recognizer(const char* group, const char* system_dir,
 
     for (u = 0; u < said_count; u++)
     {
-        uint16_t error_flags = 0, num_results = 0, mic_level = 0;
+        /* The game's reply buffer is not clean: these start as the bytes a real
+         * run left in the error word, so a field the core forgets to write
+         * reads back as garbage rather than as a lucky zero. */
+        uint16_t error_flags = 0xFE78, num_results = 0, mic_level = 0;
         uint16_t voice_level = 0, voice_length = 0, matches[10];
         unsigned count = 0, rate = 0, pushed = 0;
         int16_t* samples = read_wav(said[u].wav, &count, &rate);
@@ -330,15 +333,28 @@ static void test_recognizer(const char* group, const char* system_dir,
             continue;
         }
 
-        /* Z down, speak, Z up -- the boundary a game times an utterance by. */
-        vru_recognizer_talking(0, 1);
+        /* The player's own Z on the unit's port is not a talk button: nothing
+         * but the game raises that line. */
+        if (u == 0)
+            ok(vru_recognizer_talking(3, 1) == 0,
+               named(group, "the player's Z does not make the unit hear anyone"), NULL);
+
+        /* The game says listen, the player speaks, the game says stop and asks
+         * for the result at once, as Hey You, Pikachu! does around its own Z. */
+        vru_SetMicState(1);
+        if (u == 0)
+            ok(vru_recognizer_talking(3, 0) == 1,
+               named(group, "the unit hears someone while the game listens"), NULL);
         while (pushed < count)
         {
             unsigned block = (count - pushed > 2048u) ? 2048u : (count - pushed);
             vru_recognizer_push_pcm(samples + pushed, block);
             pushed += block;
         }
-        vru_recognizer_talking(0, 0);
+        vru_SetMicState(0);
+        if (u == 0)
+            ok(vru_recognizer_talking(3, 0) == 0,
+               named(group, "and stops once the game does"), NULL);
 
         vru_ReadVRUResults(&error_flags, &num_results, &mic_level, &voice_level,
                            &voice_length, matches);
