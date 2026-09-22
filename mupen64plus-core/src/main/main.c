@@ -836,6 +836,8 @@ static void pause_loop(void)
 
 /* called on vertical interrupt.
  * Allow the core to perform various things */
+int retro_frame_done = 0;
+
 void new_vi(void)
 {
 #if defined(PROFILE)
@@ -848,7 +850,14 @@ void new_vi(void)
     main_check_inputs();
 
     netplay_check_sync(&g_dev.r4300.cp0);
-    retro_return();
+
+    /* The frame ends at the END of gen_interrupt, not here: this is the middle
+     * of the VI handler (the next VI is not even scheduled yet), and a
+     * savestate taken or restored from here is not a frame boundary. */
+    if(!(current_rdp_type == RDP_PLUGIN_GLIDEN64 && EnableThreadedRenderer))
+        retro_frame_done = 1;
+    else
+        retro_return();
 }
 
 static void main_switch_pak(int control_id)

@@ -44,6 +44,9 @@
 #include "device/rcp/ai/ai_controller.h"
 #include "device/rcp/vi/vi_controller.h"
 #include "main/main.h"
+
+extern int retro_frame_done;
+void retro_return(void);
 #include "main/savestates.h"
 
 
@@ -661,6 +664,30 @@ void gen_interrupt(struct r4300_core* r4300)
             remove_interrupt_event(&r4300->cp0);
             exception_general(r4300);
             break;
+    }
+
+    /* The frame is over: hand control back to retro_run. retro_serialize and
+     * retro_unserialize resume us HERE and their job is done on the spot,
+     * then we yield again, so a state is taken and restored exactly at the
+     * boundary retro_run returned at and neither runs a cycle of emulation.
+     * They used to wait for the next interrupt and then the next VI, which
+     * ran a partial frame on every save and every load (rollback netplay). */
+    if (retro_frame_done)
+    {
+        retro_frame_done = 0;
+        for (;;)
+        {
+            retro_return();
+            if (r4300->cp0.interrupt_unsafe_state)
+                break;
+            if (savestates_get_job() == savestates_job_load)
+                savestates_load();
+            else if (savestates_get_job() == savestates_job_save)
+                savestates_save();
+            else
+                break;
+        }
+        return;
     }
 
     if (!r4300->cp0.interrupt_unsafe_state)

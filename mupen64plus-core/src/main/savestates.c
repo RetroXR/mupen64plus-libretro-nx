@@ -1671,6 +1671,9 @@ int savestates_save_m64p(const struct device* dev, void *data)
     if(autoinc_save_slot)
         savestates_inc_slot();
 
+    /* Only the events up to the terminator are written: zero the rest, or the
+     * state carries stack garbage and two identical machines differ. */
+    memset(queue, 0, sizeof(queue));
     save_eventqueue_infos(&dev->r4300.cp0, queue);
 
     // Allocate memory for the save state data

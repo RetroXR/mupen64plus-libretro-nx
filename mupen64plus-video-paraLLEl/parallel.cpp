@@ -146,6 +146,11 @@ bool parallel_frame_is_valid()
 	return true;
 }
 
+void parallel_wait_idle()
+{
+	RDP::wait_idle();
+}
+
 void parallel_begin_frame()
 {
 	RDP::begin_frame();

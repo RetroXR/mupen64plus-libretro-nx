@@ -14,6 +14,7 @@
 
 namespace RDP
 {
+void wait_idle();
 bool init();
 void deinit();
 void begin_frame();

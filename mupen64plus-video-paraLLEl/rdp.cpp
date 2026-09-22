@@ -141,6 +141,15 @@ void profile_refresh_end()
 	}
 }
 
+// Every RDP command handed over so far has landed in RDRAM. A savestate taken
+// with work still in flight on the GPU copies a half-drawn framebuffer, and a
+// load leaves the GPU drawing the OLD frame over the restored one.
+void wait_idle()
+{
+	if (frontend)
+		frontend->wait_for_timeline(frontend->signal_timeline());
+}
+
 void begin_frame()
 {
 	unsigned mask = vulkan->get_sync_index_mask(vulkan->handle);

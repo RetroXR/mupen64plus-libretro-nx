@@ -2495,6 +2495,11 @@ bool retro_serialize(void *data, size_t size)
    retro_savestate_complete = false;
    retro_savestate_result = 0;
 
+#ifdef HAVE_PARALLEL_RDP
+   if (current_rdp_type == RDP_PLUGIN_PARALLEL)
+      parallel_wait_idle();
+#endif
+
    savestates_set_job(savestates_job_save, savestates_type_m64p, data);
 
    if (current_rdp_type == RDP_PLUGIN_GLIDEN64)
@@ -2531,6 +2536,11 @@ bool retro_unserialize(const void *data, size_t size)
    /* A state carries no VRU state, so whatever word list the recognizer is
     * holding is no longer the one the restored game believes in. */
    vru_recognizer_reset_words();
+
+#ifdef HAVE_PARALLEL_RDP
+   if (current_rdp_type == RDP_PLUGIN_PARALLEL)
+      parallel_wait_idle();
+#endif
 
    savestates_set_job(savestates_job_load, savestates_type_m64p, data);
 

@@ -16,6 +16,7 @@ bool parallel_frame_is_valid(void);
 unsigned parallel_frame_width(void);
 unsigned parallel_frame_height(void);
 void parallel_begin_frame(void);
+void parallel_wait_idle(void);
 void parallel_set_synchronous_rdp(bool enable);
 
 void parallel_set_divot_filter(bool enable);
