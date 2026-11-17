@@ -118,7 +118,9 @@ extern z_const char * const z_errmsg[10]; /* indexed by 2-zlib_error */
 #  endif
 #endif
 
-#if defined(MACOS) || defined(TARGET_OS_MAC)
+/* Classic Mac OS only: every Apple SDK defines TARGET_OS_MAC, and the macOS 15
+ * SDK's <stdio.h> declares fdopen, which the NULL macro below breaks. */
+#if defined(MACOS) || (defined(TARGET_OS_MAC) && !defined(__APPLE__))
 #  define OS_CODE  0x07
 #  ifndef Z_SOLO
 #    if defined(__MWERKS__) && __dest_os != __be_os && __dest_os != __win32_os
