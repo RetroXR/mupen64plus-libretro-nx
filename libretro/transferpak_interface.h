@@ -17,9 +17,7 @@
  * loader hooks stay NULL and the global/sidecar fallback still applies, so a
  * RetroArch user sees no change at all.
  *
- * Provisional, and EXPERIMENTAL until upstream assigns it: a retroXR number
- * past every one upstream libretro has assigned or has an open proposal for.
- * Upstream took 94-106 after retroXR first numbered these calls there.
+ * Provisional; EXPERIMENTAL until upstream assigns a number.
  */
 
 #ifndef TRANSFERPAK_INTERFACE_H
