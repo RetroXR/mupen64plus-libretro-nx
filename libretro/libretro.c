@@ -997,8 +997,7 @@ void retro_init(void)
     memset(&transferpak_iface, 0, sizeof(transferpak_iface));
     memset(transferpak_generation, 0, sizeof(transferpak_generation));
     transferpak_iface_ok =
-        environ_cb(RETRO_ENVIRONMENT_GET_TRANSFER_PAK_INTERFACE, &transferpak_iface)
-        || environ_cb(RETRO_ENVIRONMENT_GET_TRANSFER_PAK_INTERFACE_FINAL, &transferpak_iface);
+        environ_cb(RETRO_ENVIRONMENT_GET_TRANSFER_PAK_INTERFACE, &transferpak_iface);
     if (transferpak_iface_ok)
     {
         g_media_loader.get_gb_cart_rom = media_loader_get_gb_cart_rom;
